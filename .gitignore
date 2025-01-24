@@ -1,0 +1,33 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Config and settings files
+*.env
+*.DS_Store
+
+# Logs and debug files
+*.log
+
+# Cache files
+*.cache/
+*.pytest_cache/
+*.ipynb_checkpoints/
+
+# Data files (optional - modify based on your project)
+*.csv
+*.h5
+*.pickle
+*.json
+*.db
+
+# Dataset folder
+CVEfixes/
