@@ -28,6 +28,8 @@ env/
 *.pickle
 *.json
 *.db
+*.pkl
 
 # Dataset folder
 CVEfixes/
+dataset/
