@@ -13,6 +13,7 @@ env/
 # Config and settings files
 *.env
 *.DS_Store
+nohup.out
 
 # Logs and debug files
 *.log
