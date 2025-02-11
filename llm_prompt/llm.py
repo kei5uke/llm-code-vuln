@@ -53,6 +53,9 @@ Output Requirements:
     "description": "Brief description of the CWE category."
   }
 }
+
+Now analyse the code provided and respond accordingly.
+code:
 """
 
 fs_prompt = """
@@ -177,17 +180,6 @@ code:
 models = ['llama3.1:8b', 'codellama:7b', 'phi4:latest', 'deepseek-r1:14b']
 
 
-def pause_if_needed(start_time, pause_interval=1200, pause_duration=180):
-    """Pauses execution every `pause_interval` seconds for `pause_duration` seconds."""
-    elapsed_time = time.perf_counter() - start_time
-    if elapsed_time >= pause_interval:
-        logger.info("Pausing for 3 minutes to cool down the GPU...")
-        gpu_utils.free_gpu_memory()
-        time.sleep(pause_duration)
-        logger.info("Resuming execution...")
-        return time.perf_counter()  # Reset the timer after pausing
-    return start_time  # Return the original start_time if no pause happens
-
 def classify_vuln(df, code_type):
     results_to_insert = []
     total_samples = len(df) * len(models)
@@ -207,7 +199,8 @@ def classify_vuln(df, code_type):
             file_change_id = df.iloc[i]['file_change_id']
             vuln_type = df.iloc[i]['cwe_id'] if code_type == 'vuln_code' else 'non_vuln'
             code = df.iloc[i][code_type]
-            context = prompt + '\n Code: \n' + code
+            # contest_length = df.iloc[i]['token_count'] + 1000
+            context = prompt + '\n' + code
             
             for m, model in enumerate(models):
                 # Calculate progress
@@ -217,14 +210,17 @@ def classify_vuln(df, code_type):
                 logger.info(f'[Progress] {code_type} | {model} | {sample_index}/{total_samples} | {progress:.2f}%')
 
                 # Check if we need to pause
-                start_time = pause_if_needed(start_time)
+                start_time = gpu_utils.pause_if_needed(start_time)
 
                 start_time_model = time.perf_counter()
                 
                 response = ollama.chat(
                     model=model, 
                     messages=[{"role": "user", "content": context}],
-                    options={"temperature": 0},
+                    options={
+                        "temperature": 0,
+                        "num_ctx": 20000,
+                        },
                     format=ResponseTemplate.model_json_schema()
                 )
                 

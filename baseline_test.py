@@ -6,6 +6,7 @@ sys.path.append("utils")
 sys.path.append("llm_prompt")
 
 import llm
+import gpu_utils
 
 def main():
     with open(f"./dataset/test_pickles/test_non_vuln.pkl", "rb") as f:
@@ -14,9 +15,10 @@ def main():
       vuln = pickle.load(f)
     
     for df, code_type in zip([non_vuln, vuln],['non_vuln_code', 'vuln_code']):
-       results = llm.classify_vuln(df, code_type)
-       with open(f"./result/{code_type}_results.json", "w", encoding="utf-8") as f:
+        results = llm.classify_vuln(df, code_type)
+        with open(f"./result/{code_type}_results.json", "w", encoding="utf-8") as f:
           json.dump(results, f, indent=4, ensure_ascii=False)
+        gpu_utils.sleep_for_minutes(5)
         
     
 

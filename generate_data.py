@@ -131,20 +131,6 @@ def pick_samples(df):
 
 	return final_vuln_samples, final_non_vuln_samples, df
 
-def purify_results(results):
-	# filter CWE-num only
-	for result in results:
-		cwe = result['result']['cwe']
-		if cwe is not None:
-			cwe_string = cwe['cwe_id']
-			if 'CWE-' in cwe_string:
-				match = re.search('CWE-\d+', cwe_string, re.IGNORECASE)
-				if match:
-					result['result']['cwe']['cwe_id'] = match.group()
-				else:
-					result['result']['cwe']['cwe_id'] = None
-	return results
-
 def main():
 		query = f"""
 					SELECT
