@@ -17,7 +17,7 @@ langs = ["PHP", "C", "JavaScript", "Python", "Java", "TypeScript", "C++", "Go", 
 remove_cwe = ['NVD-CWE-noinfo', 'NVD-CWE-Other']
 chosen_cwes = ['CWE-20', 'CWE-287', 'CWE-400', 'CWE-668', 'CWE-74']
 
-conn = sqlite_utils.create_connection('/home/keisuke/code/llm-code-vuln/dataset/CVEfixes_v1.0.8/Data/DB.db')
+conn = sqlite_utils.create_connection('/home/keisukek/llm-code-vuln/dataset/CVEfixes_v1.0.8/Data/DB.db')
 
 
 def pre_processing(df):
@@ -163,13 +163,18 @@ def main():
 				AND cve.description IS NOT NULL
 				AND file_change.token_count IS NOT NULL;
 			"""
+		logger.info('Executing SQL query to fetch data')
 		df = pd.read_sql(query, con=conn)
+		logger.info('Data fetched successfully, starting preprocessing')
 		df = pre_processing(df)
+		logger.info('Preprocessing completed, starting sample selection')
 		vuln, non_vuln, df = pick_samples(df)
+		logger.info('Sample selection completed, saving data to pickle files')
 
 		for f_name, data in zip(['test_vuln', 'test_non_vuln', 'df'], [vuln, non_vuln, df]):
 			with open(f'./dataset/test_pickles/{f_name}.pkl', 'wb') as f:
 				pickle.dump(data, f)
+				logger.info('Data saved to %s.pkl', f_name)
 
 
 if __name__ == '__main__':

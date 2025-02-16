@@ -5,6 +5,7 @@ import json
 import logging
 import sys
 import time
+import tiktoken
 sys.path.append("utils")
 
 import gpu_utils
@@ -26,9 +27,10 @@ class ResponseTemplate(BaseModel):
 prompt = """
 You are a security expert tasked with identifying vulnerabilities in a given code. Carefully analyze the code using CWE (Common Weakness Enumeration) descriptions and determine if it contains any vulnerabilities step by step.
 For each step:
-
-1. Analyze the code to check if it contains any vulnerabilities.
-  - If a vulnerability is identified, proceed to steps 2–4.
+1. Examine overall the structure of the code to understand its purpose and functionality.
+2. Assess User Input Handling & Data Flow. Determine how inputs are received and processed (e.g., user input, file input, API request). Track data flow to check if input validation/sanitization is missing or insufficient.
+3. Analyze the code to check if it contains any vulnerabilities.
+  - If a vulnerability is identified, proceed to steps 4–7.
   - If no vulnerabilities are found, the output must be strictly:
 {
   "is_this_vuln": False,
@@ -37,10 +39,10 @@ For each step:
   "cwe": None
 } 
 
-2. Identify the name of function in the code that could be exploited. You can refer to the function name or the code snippet that could be exploited. 
-3. Explain why the identified area might be vulnerable, providing a detailed explanation referencing CWE descriptions.
-4. Based on the analysis, identify the CWE category and include its ID, name, and description.
-5. Respond only with the following JSON format.
+4. Identify the name of function in the code that could be exploited. You can refer to the function name or the code snippet that could be exploited. 
+5. Explain why the identified area might be vulnerable, providing a detailed explanation referencing CWE descriptions.
+6. Based on the analysis, identify the CWE category and include its ID, name, and description.
+7. Respond only with the following JSON format.
 
 Output Requirements:
 {
@@ -62,7 +64,6 @@ fs_prompt = """
 You are a security expert tasked with identifying vulnerabilities in a given code. Carefully analyze the code using CWE (Common Weakness Enumeration) descriptions step by step.
 
 Example 1: Vulnerable Code
-```c
 #define MAX_DIM 100
 /* board dimensions */
 
@@ -82,7 +83,7 @@ if (m > MAX_DIM || n > MAX_DIM) {
     die("Value too large: Die evil hacker!\n");
 }
 board = (board_square_t*) malloc(m * n * sizeof(board_square_t));
-```
+
 Response:
 {
   "is_this_vuln": true,
@@ -96,11 +97,10 @@ Response:
 }
 
 Example 2: Vulnerable Code
-```php
 $birthday = $_GET['birthday'];
 $homepage = $_GET['homepage'];
 echo "Birthday: $birthday<br>Homepage: <a href=$homepage>click here</a>";
-```
+
 Response:
 {
   "is_this_vuln": true,
@@ -114,7 +114,6 @@ Response:
 }
 
 Example 3: Non-vulnerable Code
-```java
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
@@ -145,7 +144,8 @@ public class AuthController {
         return "Invalid credentials";
     }
 }
-```
+
+Response:
 {
   "is_this_vuln": false,
   "vuln_code_part": None,
@@ -154,7 +154,6 @@ public class AuthController {
 }
 
 Example 4: Non-vulnerable Code
-```go
 func serve(w http.ResponseWriter, r *http.Request) {
   var body []byte
   const MaxRespBodyLength = 1e6
@@ -165,7 +164,8 @@ func serve(w http.ResponseWriter, r *http.Request) {
     }
   }
 }
-```
+
+Response:
 {
   "is_this_vuln": false,
   "vuln_code_part": None,
@@ -177,7 +177,7 @@ Now analyse the code provided and respond accordingly.
 code:
 """
 
-models = ['llama3.1:8b', 'codellama:7b', 'phi4:latest', 'deepseek-r1:14b']
+models = ['llama3.1:8b', 'codellama:7b', 'phi4:14b', 'deepseek-r1:14b']
 
 
 def classify_vuln(df, code_type):
@@ -200,51 +200,75 @@ def classify_vuln(df, code_type):
             vuln_type = df.iloc[i]['cwe_id'] if code_type == 'vuln_code' else 'non_vuln'
             code = df.iloc[i][code_type]
             # contest_length = df.iloc[i]['token_count'] + 1000
-            context = prompt + '\n' + code
+            context = fs_prompt + '\n' + code
+            encoding = tiktoken.get_encoding("cl100k_base")
+            token_count = len(encoding.encode(context)) + 500
             
             for m, model in enumerate(models):
-                # Calculate progress
-                sample_index = i * len(models) + m + 1
-                progress = (sample_index / total_samples) * 100
+                retry_attempts = 1
+                for attempt in range(retry_attempts + 1):
+                  try:
+                    gpu_utils.free_gpu_memory()
 
-                logger.info(f'[Progress] {code_type} | {model} | {sample_index}/{total_samples} | {progress:.2f}%')
+                    # Calculate progress
+                    sample_index = i * len(models) + m + 1
+                    progress = (sample_index / total_samples) * 100
 
-                # Check if we need to pause
-                start_time = gpu_utils.pause_if_needed(start_time)
+                    logger.info(f'[Progress] {code_type} | {token_count} tokens | {model} | {sample_index}/{total_samples} | {progress:.2f}%')
+                    start_time_model = time.perf_counter()
 
-                start_time_model = time.perf_counter()
-                
-                response = ollama.chat(
-                    model=model, 
-                    messages=[{"role": "user", "content": context}],
-                    options={
+                    response = ollama.chat(
+                      model=model, 
+                      messages=[{"role": "user", "content": context}],
+                      options={
                         "temperature": 0,
-                        "num_ctx": 20000,
-                        },
-                    format=ResponseTemplate.model_json_schema()
-                )
-                
-                end_time_model = time.perf_counter()
-                result = json.loads(response['message']['content'])
-                
-                model_name = model
-                
-                results_to_insert.append({
-                    'file_change_id': file_change_id,
-                    'vuln_type': vuln_type,
-                    'result': result,
-                    'model': model_name,
-                    'version': version,
-                    'error': error,
-                    'time': end_time_model - start_time_model
-                })
+                        "num_ctx": token_count,
+                      },
+                      format=ResponseTemplate.model_json_schema()
+                    )
+                    
+                    end_time_model = time.perf_counter()
 
-                # Save progress at each 10% milestone
-                if progress >= next_save_point:
-                    with open(f'./result/progress_{code_type}_{int(next_save_point)}.json', 'w') as f:
+
+                    result = json.loads(response['message']['content'])
+                    
+                    model_name = model
+                    
+                    results_to_insert.append({
+                      'file_change_id': file_change_id,
+                      'vuln_type': vuln_type,
+                      'result': result,
+                      'model': model_name,
+                      'version': version,
+                      'error': error,
+                      'time': end_time_model - start_time_model
+                    })
+
+                    logger.info(f'[Progress] Time: {end_time_model - start_time_model:.2f}s')
+
+                    # Save progress at each 10% milestone
+                    if progress >= next_save_point:
+                      with open(f'./result/progress_{code_type}_{int(next_save_point)}.json', 'w') as f:
                         json.dump(results_to_insert, f, indent=4)
-                    logger.info(f'Saved progress at {next_save_point}%')
-                    next_save_point += save_interval  # Increment to the next save point
+                      logger.info(f'Saved progress at {next_save_point}%')
+                      next_save_point += save_interval  # Increment to the next save point
+                    
+                    break  # Exit retry loop if successful
+
+                  except Exception as e:
+                    logger.error(f'Attempt {attempt + 1} failed: {e}')
+                    if attempt == retry_attempts:
+                      error = True
+                      results_to_insert.append({
+                        'file_change_id': file_change_id,
+                        'vuln_type': vuln_type,
+                        'result': result,
+                        'model': model_name,
+                        'version': version,
+                        'error': error,
+                        'time': None
+                      })
+                    
 
         except Exception as e:
             error = True
