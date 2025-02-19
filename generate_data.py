@@ -4,6 +4,7 @@ import re
 import pickle
 import logging
 import sys
+import os
 sys.path.append("utils")
 
 import sqlite_utils
@@ -17,7 +18,7 @@ langs = ["PHP", "C", "JavaScript", "Python", "Java", "TypeScript", "C++", "Go", 
 remove_cwe = ['NVD-CWE-noinfo', 'NVD-CWE-Other']
 chosen_cwes = ['CWE-20', 'CWE-287', 'CWE-400', 'CWE-668', 'CWE-74']
 
-conn = sqlite_utils.create_connection('/home/keisukek/llm-code-vuln/dataset/CVEfixes_v1.0.8/Data/DB.db')
+conn = sqlite_utils.create_connection('/home/keisukek/code/llm-code-vuln/dataset/CVEfixes_v1.0.8/Data/DB.db')
 
 
 def pre_processing(df):
@@ -171,6 +172,7 @@ def main():
 		vuln, non_vuln, df = pick_samples(df)
 		logger.info('Sample selection completed, saving data to pickle files')
 
+		os.makedirs('./dataset/test_pickles', exist_ok=True)
 		for f_name, data in zip(['test_vuln', 'test_non_vuln', 'df'], [vuln, non_vuln, df]):
 			with open(f'./dataset/test_pickles/{f_name}.pkl', 'wb') as f:
 				pickle.dump(data, f)
