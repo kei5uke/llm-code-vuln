@@ -22,61 +22,61 @@ conn = sqlite_utils.create_connection('/home/keisukek/code/llm-code-vuln/dataset
 
 
 def pre_processing(df):
-	# keep only the specified programming languages
-	df = df[df['programming_language'].isin(langs)]
+    # Ensure df is a copy to avoid SettingWithCopyWarning
+    df = df[df['programming_language'].isin(langs)].copy()
 
-	# code diff: both add & del should exist
-	df['diff_added'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['added'], axis=1)
-	df['diff_deleted'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['deleted'], axis=1)
-	df = df[df['diff_added'].apply(bool) & df['diff_deleted'].apply(bool)]
-	df = df.reset_index(drop=True)
-	df = df.drop(columns=['diff_parsed'])
+    # code diff: both add & del should exist
+    df.loc[:, 'diff_added'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['added'], axis=1)
+    df.loc[:, 'diff_deleted'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['deleted'], axis=1)
 
-	# cve description type str -> arr
-	def parse_py_literal(text):
-		if not isinstance(text, str):
-			return text
-		try:
-			return ast.literal_eval(text)
-		except (SyntaxError, ValueError):
-			return None
+    df = df[df['diff_added'].apply(bool) & df['diff_deleted'].apply(bool)].copy()
+    df.drop(columns=['diff_parsed'], inplace=True)
 
-	df['cve_description'] = df['cve_description'].apply(parse_py_literal)
+    # cve description type str -> arr
+    def parse_py_literal(text):
+        if not isinstance(text, str):
+            return text
+        try:
+            return ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return None
 
-	# code before and after
-	df = df[df['vuln_code'].notna()]
-	df = df[df['vuln_code'] != 'None']
-	df = df[df['non_vuln_code'].notna()]
-	df = df[df['non_vuln_code'] != 'None']
+    df.loc[:, 'cve_description'] = df['cve_description'].apply(parse_py_literal)
 
-	# remove rows where number of lines in the code is below 30
-	for col in ['vuln_code', 'non_vuln_code']:
-		df[f'{col}_num_lines'] = df[col].apply(
-			lambda x: x.count('\n') + 1 if isinstance(x, str) else 0
-		)
-		df = df[df[f'{col}_num_lines'] >= 30]
+    # Ensure code before and after are valid
+    df = df[df['vuln_code'].notna() & (df['vuln_code'] != 'None')].copy()
+    df = df[df['non_vuln_code'].notna() & (df['non_vuln_code'] != 'None')].copy()
 
-	# remove empty list in diff_deleted
-	df = df[df['diff_deleted'].apply(lambda x: isinstance(x, list) and len(x) > 0)]
+    # Remove rows where number of lines in the code is below 30
+    for col in ['vuln_code', 'non_vuln_code']:
+        df.loc[:, f'{col}_num_lines'] = df[col].apply(
+            lambda x: x.count('\n') + 1 if isinstance(x, str) else 0
+        )
+        df = df[df[f'{col}_num_lines'] >= 30].copy()
 
-	# token_count should be num
-	df['token_count'] = df['token_count'].apply(parse_py_literal)
-	df = df.dropna(subset=['token_count'])
-	df['token_count'] = pd.to_numeric(df['token_count'])
+    # Remove empty list in diff_deleted
+    df = df[df['diff_deleted'].apply(lambda x: isinstance(x, list) and len(x) > 0)].copy()
 
-	# drop the other CWEs
-	df = df[~df["cwe_id"].isin(remove_cwe)]
+    # Ensure token_count is a numeric column
+    df.loc[:, 'token_count'] = df['token_count'].apply(parse_py_literal)
+    df = df.dropna(subset=['token_count']).copy()
+    df.loc[:, 'token_count'] = pd.to_numeric(df['token_count'])
 
-	# Add Cluss column (Parent CWE)
-	cwe_uniques = df['cwe_id'].unique()
-	for cwe in cwe_uniques:
-		parents = explore_cwe.find_parents_dict(cwe.split('-')[1])
-		if parents is None or len(parents['Class']) == 0 : continue
-		df.loc[df['cwe_id'] == cwe, 'class'] = parents['Class'][-1]
+    # Drop the other CWEs
+    df = df[~df["cwe_id"].isin(remove_cwe)].copy()
 
-	df = df.dropna()
+    # Add class column (Parent CWE)
+    cwe_uniques = df['cwe_id'].unique()
+    for cwe in cwe_uniques:
+        parents = explore_cwe.find_parents_dict(cwe.split('-')[1])
+        if parents is None or len(parents['Class']) == 0:
+            continue
+        df.loc[df['cwe_id'] == cwe, 'class'] = parents['Class'][-1]
 
-	return df
+    df = df.dropna().copy()
+
+    return df
+
 
 def pick_samples(df):
 	sample_size = 10
@@ -171,7 +171,7 @@ def main():
 		logger.info('Preprocessing completed, starting sample selection')
 		vuln, non_vuln, df = pick_samples(df)
 		logger.info('Sample selection completed, saving data to pickle files')
-
+    
 		os.makedirs('./dataset/test_pickles', exist_ok=True)
 		for f_name, data in zip(['test_vuln', 'test_non_vuln', 'df'], [vuln, non_vuln, df]):
 			with open(f'./dataset/test_pickles/{f_name}.pkl', 'wb') as f:
