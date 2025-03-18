@@ -207,11 +207,11 @@ def main():
   for prompt_temp, prompt_type in zip([cot_prompt, fs_prompt], ['cot_prompt', 'fs_prompt']):
     for df, code_type in zip([non_vuln, vuln], ['non_vuln_code', 'vuln_code'], ):
       logging.info(f"Classifying {code_type}.")
-      os.makedirs(f'./result/{prompt_type}', exist_ok=True)
-      results = classify_vuln(df, SYSTEM_PROMPT, code_type, prompt_temp, prompt_type)
+      os.makedirs(f'./result/rag_{prompt_type}', exist_ok=True)
+      results = classify_vuln(df, SYSTEM_PROMPT, code_type, prompt_temp, prompt_type, rag_step=True)
       
       logging.info(f"Saving results for {code_type}.")
-      with open(f"./result/{prompt_type}/{code_type}_results.json", "w", encoding="utf-8") as f:
+      with open(f"./result/rag_{prompt_type}/{code_type}_results.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=4, ensure_ascii=False)
       
       logging.info(f"Sleeping for 5 minutes to manage GPU usage.")

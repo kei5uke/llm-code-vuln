@@ -37,3 +37,6 @@ dataset/
 
 *unsloth*/
 *.json*
+
+rag_tools/volumes/*
+chroma_db

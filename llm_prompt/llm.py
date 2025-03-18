@@ -1,289 +1,227 @@
 import ollama
-from typing import Union
-from pydantic import BaseModel
 import json
 import logging
 import sys
 import time
+import multiprocessing
 import tiktoken
+from typing import Union
+from pydantic import BaseModel
+from pymilvus import Collection
+
 sys.path.append("utils")
-
+sys.path.append("rag_tools")
 import gpu_utils
+import query_rag
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Define Pydantic models for structured responses
 class ClassifyTemplate(BaseModel):
-  cwe_id: str
-  name: str
-  description: str
+    cwe_id: str
+    name: str
+    description: str
 
-class ResponseTemplate(BaseModel):
-  is_this_vuln: bool
-  vuln_code_part: Union[str, None]
-  reason: Union[str, None]
-  cwe: Union[ClassifyTemplate, None]
+class ClassificationTemplate(BaseModel):
+    is_this_vuln: bool
+    vuln_code_part: Union[str, None]
+    reason: Union[str, None]
+    cwe: Union[ClassifyTemplate, None]
 
-prompt = """
-You are a security expert tasked with identifying vulnerabilities in a given code. Carefully analyze the code using CWE (Common Weakness Enumeration) descriptions and determine if it contains any vulnerabilities step by step.
-For each step:
-1. Examine overall the structure of the code to understand its purpose and functionality.
-2. Assess User Input Handling & Data Flow. Determine how inputs are received and processed (e.g., user input, file input, API request). Track data flow to check if input validation/sanitization is missing or insufficient.
-3. Analyze the code to check if it contains any vulnerabilities.
-  - If a vulnerability is identified, proceed to steps 4–7.
-  - If no vulnerabilities are found, the output must be strictly:
+class RagQueryTemplate(BaseModel):
+    code_function: str
+    input_handling: str
+    data_flow: str
+    search_query: str
+
+# Constants
+#MODELS = ['llama3.1:8b', 'codellama:7b', 'phi4:14b', 'deepseek-r1:14b']
+MODELS = ['hf.co/Kei5uke/llama3_30_epoch:latest', 'hf.co/Kei5uke/codellama_30_epoch:latest', 'hf.co/Kei5uke/phi4_30_epoch:latest', 'hf.co/Kei5uke/deepseek_30_epoch:latest']
+
+TIMEOUT = 180  # 3 minutes
+SAVE_INTERVAL = 10  # Save progress every 10%
+ANALYSIS_PROMPT = """Analyze the following code snippet and perform the following tasks:
+1. Analyze the Code Function:
+  - Describe the purpose of the code.
+  - Identify the main functionality or operation being performed.
+2. Analyze the Code Input Handling:
+  - Identify how inputs are received, processed, or validated.
+  - Highlight any potential issues with input handling, such as lack of validation, sanitization, or improper use of sensitive data.
+3. Analyze the Data Flow:
+  - Trace the flow of data through the code.
+  - Identify where sensitive data is stored, transmitted, or used.
+  - Highlight any potential risks in the data flow, such as exposure to unauthorized access or improper storage.
+4. Generate a Query String:
+  - Based on the analysis, generate a concise search query that can be used to retrieve relevant CWE vulnerability information from RAG data.
+  - The query should focus on the identified security issues, such as improper input handling, insecure data storage, or vulnerabilities related to the code's functionality.
+  - The query should be in natural language and optimized for retrieving information from a document or knowledge base
+5. Respond with the following JSON format:
 {
-  "is_this_vuln": False,
-  "vuln_code_part": None,
-  "reason": "Detailed explanation of why the code is safe.",
-  "cwe": None
-} 
-
-4. Identify the name of function in the code that could be exploited. You can refer to the function name or the code snippet that could be exploited. 
-5. Explain why the identified area might be vulnerable, providing a detailed explanation referencing CWE descriptions.
-6. Based on the analysis, identify the CWE category and include its ID, name, and description.
-7. Respond only with the following JSON format.
-
-Output Requirements:
-{
-  "is_this_vuln": True,
-  "vuln_code_part": "the code snippet that could be exploited.",
-  "reason": "Detailed explanation of why the code is vulnerable.",
-  "cwe": {
-    "cwe_id": "CWE-XXX",
-    "name": "Name of the CWE category",
-    "description": "Brief description of the CWE category."
-  }
+  "code_function": "Description of the code's purpose and functionality",
+  "input_handling": "Description of input handling and potential issues",
+  "data_flow": "Description of data flow and potential risks",
+  "search_query": "Generated natural language query for retrieving relevant CWE information from RAG data"
 }
-
-Now analyse the code provided and respond accordingly.
-code:
+Code Snippet:
 """
 
-fs_prompt = """
-You are a security expert tasked with identifying vulnerabilities in a given code. Carefully analyze the code using CWE (Common Weakness Enumeration) descriptions step by step.
+EMBEDDING_MODEL = "mxbai-embed-large:335m"
+RAG_COLLECTION_NAME = "rag_collection_demo_1"
 
-Example 1: Vulnerable Code
-#define MAX_DIM 100
-/* board dimensions */
+query_rag.initialize_milvus_connection()
+RAG_COLLECTION = Collection(RAG_COLLECTION_NAME)
 
-int m, n, error;
-board_square_t *board;
-printf("Please specify the board height: \n");
-error = scanf("%d", &m);
-if (EOF == error) {
-    die("No integer passed: Die evil hacker!\n");
-}
-printf("Please specify the board width: \n");
-error = scanf("%d", &n);
-if (EOF == error) {
-    die("No integer passed: Die evil hacker!\n");
-}
-if (m > MAX_DIM || n > MAX_DIM) {
-    die("Value too large: Die evil hacker!\n");
-}
-board = (board_square_t*) malloc(m * n * sizeof(board_square_t));
+# Helper Functions
+def log_progress(code_type, token_count, model, sample_index, total_samples):
+    """Log the progress of processing."""
+    progress = (sample_index / total_samples) * 100
+    logger.info(
+        f"[Progress] {code_type} | {token_count} tokens | {model} | "
+        f"{sample_index}/{total_samples} | {progress:.2f}%"
+    )
+    return progress
 
-Response:
-{
-  "is_this_vuln": true,
-  "vuln_code_part": "board = (board_square_t*) malloc(m * n * sizeof(board_square_t));",
-  "reason": "The program does not validate negative inputs for 'm' and 'n'. An attacker could input large negative values, leading to integer overflow (CWE-190) or excessive memory allocation (CWE-789), potentially crashing the system (CWE-400).",
-  "cwe": {
-    "cwe_id": "CWE-190",
-    "name": "Integer Overflow or Wraparound",
-    "description": "The software performs a calculation that leads to an integer overflow, potentially causing memory mismanagement or logic errors."
-  }
-}
+def calculate_token_length(prompt):
+    """Calculate the token length of a prompt using tiktoken."""
+    encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(prompt))
 
-Example 2: Vulnerable Code
-$birthday = $_GET['birthday'];
-$homepage = $_GET['homepage'];
-echo "Birthday: $birthday<br>Homepage: <a href=$homepage>click here</a>";
-
-Response:
-{
-  "is_this_vuln": true,
-  "vuln_code_part": "echo \"Birthday: $birthday<br>Homepage: <a href=$homepage>click here</a>\";",
-  "reason": "The code directly outputs user-controlled variables without sanitization. An attacker could inject JavaScript (CWE-79) for XSS attacks or manipulate SQL queries (CWE-89) if the values are used in database queries.",
-  "cwe": {
-    "cwe_id": "CWE-79",
-    "name": "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')",
-    "description": "The application does not neutralize user-controlled input before incorporating it into HTML, allowing attackers to execute malicious scripts in the victim's browser."
-  }
-}
-
-Example 3: Non-vulnerable Code
-@RestController
-@RequestMapping("/api/auth")
-public class AuthController {
-
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private BCryptPasswordEncoder passwordEncoder;
-
-    @PostMapping("/register")
-    public String registerUser(@Valid @RequestBody User user) {
-        if (userRepository.findByUsername(user.getUsername()).isPresent()) {
-            return "Username already exists";
-        }
-        user.setPassword(passwordEncoder.encode(user.getPassword())); // Securely hash password
-        userRepository.save(user);
-        return "User registered successfully";
-    }
-
-    @PostMapping("/login")
-    public String loginUser(@Valid @RequestBody LoginRequest loginRequest) {
-        Optional<User> userOpt = userRepository.findByUsername(loginRequest.getUsername());
-
-        if (userOpt.isPresent() && passwordEncoder.matches(loginRequest.getPassword(), userOpt.get().getPassword())) {
-            return "Login successful";
-        }
-        return "Invalid credentials";
-    }
-}
-
-Response:
-{
-  "is_this_vuln": false,
-  "vuln_code_part": None,
-  "reason": "The code follows secure coding practices: it uses JPA to prevent SQL injection, applies BCrypt for password hashing to avoid plaintext password storage, and enforces input validation (CWE-20) with @Valid. Additionally, it does not expose sensitive information or use hardcoded secrets.",
-  "cwe": None
-}
-
-Example 4: Non-vulnerable Code
-func serve(w http.ResponseWriter, r *http.Request) {
-  var body []byte
-  const MaxRespBodyLength = 1e6
-  if r.Body != nil {
-    r.Body = http.MaxBytesReader(w, r.Body, MaxRespBodyLength)
-    if data, err := io.ReadAll(r.Body); err == nil {
-      body = data
-    }
-  }
-}
-
-Response:
-{
-  "is_this_vuln": false,
-  "vuln_code_part": None,
-  "reason": "The code prevents resource exhaustion by limiting the maximum request body size using http.MaxBytesReader. This ensures that malicious clients cannot send excessively large payloads that could consume system memory and cause service disruptions.",
-  "cwe": None
-}
-
-Now analyse the code provided and respond accordingly.
-code:
-"""
-
-models = ['llama3.1:8b', 'codellama:7b', 'phi4:14b', 'deepseek-r1:14b']
-
-
-def classify_vuln(df, code_type):
-    results_to_insert = []
-    total_samples = len(df) * len(models)
-    save_interval = 10  # Save every 10%
-    next_save_point = save_interval  # Start at 10%
-
-    start_time = time.perf_counter()  # Track the start time
-
-    for i in range(len(df)):
-        file_change_id = None
-        version = 1
-        error = False
-        model_name = None
-        result = None
-
+def call_ollama(model, system_prompt, user_prompt, prompt_type="classification"):
+    """Call the Ollama API with a timeout."""
+    queue = multiprocessing.Queue()
+    
+    def api_call(q):
         try:
-            file_change_id = df.iloc[i]['file_change_id']
-            vuln_type = df.iloc[i]['cwe_id'] if code_type == 'vuln_code' else 'non_vuln'
-            code = df.iloc[i][code_type]
-            # contest_length = df.iloc[i]['token_count'] + 1000
-            context = fs_prompt + '\n' + code
-            encoding = tiktoken.get_encoding("cl100k_base")
-            token_count = len(encoding.encode(context)) + 500
-            
-            for m, model in enumerate(models):
-                retry_attempts = 1
-                for attempt in range(retry_attempts + 1):
-                  try:
-                    gpu_utils.free_gpu_memory()
+            format = ClassificationTemplate if "classification" in prompt_type else RagQueryTemplate
+            response = ollama.chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                options={"temperature": 0, "num_ctx": calculate_token_length(system_prompt + user_prompt) + 500},
+                format=format.model_json_schema()
+            )
+            try:
+                response = json.loads(response["message"]["content"])
+            except Exception as e:
+                logger.error(f"JSON parsing failed: {e}")
+                q.put({"error": f"JSON parsing failed: {e}"})
+                return
 
-                    # Calculate progress
-                    sample_index = i * len(models) + m + 1
-                    progress = (sample_index / total_samples) * 100
-
-                    logger.info(f'[Progress] {code_type} | {token_count} tokens | {model} | {sample_index}/{total_samples} | {progress:.2f}%')
-                    start_time_model = time.perf_counter()
-
-                    response = ollama.chat(
-                      model=model, 
-                      messages=[{"role": "user", "content": context}],
-                      options={
-                        "temperature": 0,
-                        "num_ctx": token_count,
-                      },
-                      format=ResponseTemplate.model_json_schema()
-                    )
-                    
-                    end_time_model = time.perf_counter()
-
-
-                    result = json.loads(response['message']['content'])
-                    
-                    model_name = model
-                    
-                    results_to_insert.append({
-                      'file_change_id': file_change_id,
-                      'vuln_type': vuln_type,
-                      'result': result,
-                      'model': model_name,
-                      'version': version,
-                      'error': error,
-                      'time': end_time_model - start_time_model
-                    })
-
-                    logger.info(f'[Progress] Time: {end_time_model - start_time_model:.2f}s')
-
-                    # Save progress at each 10% milestone
-                    if progress >= next_save_point:
-                      with open(f'./result/progress_{code_type}_{int(next_save_point)}.json', 'w') as f:
-                        json.dump(results_to_insert, f, indent=4)
-                      logger.info(f'Saved progress at {next_save_point}%')
-                      next_save_point += save_interval  # Increment to the next save point
-                    
-                    break  # Exit retry loop if successful
-
-                  except Exception as e:
-                    logger.error(f'Attempt {attempt + 1} failed: {e}')
-                    if attempt == retry_attempts:
-                      error = True
-                      results_to_insert.append({
-                        'file_change_id': file_change_id,
-                        'vuln_type': vuln_type,
-                        'result': result,
-                        'model': model_name,
-                        'version': version,
-                        'error': error,
-                        'time': None
-                      })
-                    
-
+            q.put(response)
         except Exception as e:
-            error = True
-            logger.error(f'Something went wrong: {e}')
-            results_to_insert.append({
-                'file_change_id': file_change_id,
-                'vuln_type': vuln_type,
-                'result': result,
-                'model': model_name,
-                'version': version,
-                'error': error,
-                'time': None
-            })
+            q.put({"error": str(e)})
 
-        finally:
-            gpu_utils.free_gpu_memory()
-            
-    return results_to_insert
+    try:
+        process = multiprocessing.Process(target=api_call, args=(queue,))
+        process.start()
+        process.join(timeout=TIMEOUT)
+
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            return {"error": f"Ollama API call timed out after {TIMEOUT} seconds"}
+
+        return queue.get() if not queue.empty() else {"error": "No response from API"}
+    except Exception as e:
+        logger.error(f"Process creation/execution failed: {e}")
+        return {"error": f"Process creation/execution failed: {e}"}
+    finally:
+        queue.close()  # Ensure the queue is closed
+
+def process_rag_step(model, system_prompt, code):
+    """Process the RAG step for a given model."""
+    rag_prompt = ANALYSIS_PROMPT + code + "\nJSON:\n"
+    response = call_ollama(model, system_prompt, rag_prompt, prompt_type="rag")
+    if "error" in response:
+        logger.error(f"[Error] Rag: {response['error']}")
+        return None
+
+    rag_result = response
+    if rag_result.get("search_query", "") != "":
+        try:
+            rag_context = query_rag.query_milvus(RAG_COLLECTION, rag_result["search_query"], EMBEDDING_MODEL)
+            return rag_context, rag_result
+        except Exception as e:
+            logger.error(f"[Error] Milvus query failed: {e}")
+            return None
+
+    return None
+
+def save_progress(results, prompt_type, code_type, progress, rag_step=False):
+    """Save progress to a JSON file."""
+    prompt_type = "rag_"+prompt_type if rag_step else prompt_type
+    save_path = f"./result/{prompt_type}/progress_{code_type}_{int(progress)}.json"
+    with open(save_path, "w") as f:
+        json.dump(results, f, indent=4)
+    logger.info(f"Saved progress at {progress}%")
+
+def classify_vuln(df, system_prompt, code_type, prompt_temp, prompt_type, rag_step=False):
+    """Classify vulnerabilities using the specified models."""
+    results = []
+    total_samples = len(df) * len(MODELS)
+    next_save_point = SAVE_INTERVAL
+
+    for i, row in df.iterrows():
+        file_change_id = row.get("file_change_id")
+        vuln_type = row["cwe_id"] if code_type == "vuln_code" else "non_vuln"
+        code = row[code_type]
+        user_prompt = prompt_temp + code
+
+        # if rag_step == False:
+        #     MODELS = ['hf.co/Kei5uke/llama3_30_epoch:latest', 'hf.co/Kei5uke/codellama_30_epoch:latest', 'hf.co/Kei5uke/phi4_30_epoch:latest', 'hf.co/Kei5uke/deepseek_30_epoch:latest']
+
+        for m, model in enumerate(MODELS):
+            try:
+                gpu_utils.free_gpu_memory()
+                start_time = time.perf_counter()
+                start_time = gpu_utils.pause_if_needed(start_time)
+
+                sample_index = i * len(MODELS) + m + 1
+
+                # Process RAG step if enabled
+                rag_result = None  # Initialize to store the full RAG response
+                rag_context = None  # Initialize to store only the RAG context
+                user_prompt_with_context = user_prompt
+                if rag_step:
+                    rag_context, rag_result = process_rag_step(model, system_prompt, code)  # Store the full response
+                    if rag_result and rag_context:
+                        user_context = f"\nRetrieved Context:\n{rag_context}"
+                        user_prompt_with_context = user_prompt + user_context
+
+                token_count = calculate_token_length(system_prompt + user_prompt_with_context)
+                progress = log_progress(code_type, token_count, model, sample_index, total_samples)
+
+                # Call Ollama for classification
+                # print("SYSTEM PROMPT: ", system_prompt)
+                # print("USER PROMPT: ", user_prompt_with_context)
+                response = call_ollama(model, system_prompt, user_prompt_with_context, prompt_type="classification")
+                elapsed_time = time.perf_counter() - start_time
+
+                # Prepare result entry
+                result_entry = {
+                    "file_change_id": file_change_id,
+                    "vuln_type": vuln_type,
+                    "result": response,
+                    "model": model,
+                    "version": 1,
+                    "error": "error" in response,
+                    "time": elapsed_time if "error" not in response else None,
+                    "rag_response": rag_result,  # Store the full RAG response
+                    "rag_context": rag_context  # Store only the RAG context (if needed)
+                }
+
+                results.append(result_entry)
+
+                # Save progress periodically
+                if progress >= next_save_point:
+                    save_progress(results, prompt_type, code_type, next_save_point, rag_step=rag_step)
+                    next_save_point += SAVE_INTERVAL
+            except Exception as e:
+                logger.error(f"[Error] Processing failed for model {model}, row {i}: {e}")
+                continue  # Continue to the next iteration
+
+    return results

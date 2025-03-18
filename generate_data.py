@@ -17,65 +17,88 @@ langs = ["PHP", "C", "JavaScript", "Python", "Java", "TypeScript", "C++", "Go", 
 remove_cwe = ['NVD-CWE-noinfo', 'NVD-CWE-Other']
 chosen_cwes = ['CWE-20', 'CWE-287', 'CWE-400', 'CWE-668', 'CWE-74']
 
-conn = sqlite_utils.create_connection('/home/keisukek/llm-code-vuln/dataset/CVEfixes_v1.0.8/Data/DB.db')
+conn = sqlite_utils.create_connection('/home/keisuke/code/llm-code-vuln/dataset/CVEfixes_v1.0.8/Data/DB.db')
 
 
 def pre_processing(df):
-	# keep only the specified programming languages
-	df = df[df['programming_language'].isin(langs)]
+    print(f"Initial df length: {len(df)}")
 
-	# code diff: both add & del should exist
-	df['diff_added'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['added'], axis=1)
-	df['diff_deleted'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['deleted'], axis=1)
-	df = df[df['diff_added'].apply(bool) & df['diff_deleted'].apply(bool)]
-	df = df.reset_index(drop=True)
-	df = df.drop(columns=['diff_parsed'])
+    # keep only the specified programming languages
+    df = df[df['programming_language'].isin(langs)]
+    print(f"After filtering programming languages: {len(df)}")
 
-	# cve description type str -> arr
-	def parse_py_literal(text):
-		if not isinstance(text, str):
-			return text
-		try:
-			return ast.literal_eval(text)
-		except (SyntaxError, ValueError):
-			return None
+    # code diff: both add & del should exist
+    df['diff_added'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['added'], axis=1)
+    df['diff_deleted'] = df.apply(lambda row: ast.literal_eval(row.diff_parsed)['deleted'], axis=1)
+    df = df[df['diff_added'].apply(bool) & df['diff_deleted'].apply(bool)]
+    print(f"After filtering diff_added & diff_deleted: {len(df)}")
 
-	df['cve_description'] = df['cve_description'].apply(parse_py_literal)
+    df = df.reset_index(drop=True)
+    df = df.drop(columns=['diff_parsed'])
 
-	# code before and after
-	df = df[df['vuln_code'].notna()]
-	df = df[df['vuln_code'] != 'None']
-	df = df[df['non_vuln_code'].notna()]
-	df = df[df['non_vuln_code'] != 'None']
+    # cve description type str -> arr
+    def parse_py_literal(text):
+        if not isinstance(text, str):
+            return text
+        try:
+            return ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return None
 
-	# remove rows where number of lines in the code is below 30
-	for col in ['vuln_code', 'non_vuln_code']:
-		df[f'{col}_num_lines'] = df[col].apply(
-			lambda x: x.count('\n') + 1 if isinstance(x, str) else 0
-		)
-		df = df[df[f'{col}_num_lines'] >= 30]
+    df['cve_description'] = df['cve_description'].apply(parse_py_literal)
 
-	# remove empty list in diff_deleted
-	df = df[df['diff_deleted'].apply(lambda x: isinstance(x, list) and len(x) > 0)]
+    # code before and after
+    df = df[df['vuln_code'].notna()]
+    print(f"After removing NaN vuln_code: {len(df)}")
 
-	# token_count should be num
-	df['token_count'] = df['token_count'].apply(parse_py_literal)
-	df = df.dropna(subset=['token_count'])
-	df['token_count'] = pd.to_numeric(df['token_count'])
+    df = df[df['vuln_code'] != 'None']
+    print(f"After removing 'None' vuln_code: {len(df)}")
 
-	# drop the other CWEs
-	df = df[~df["cwe_id"].isin(remove_cwe)]
+    df = df[df['non_vuln_code'].notna()]
+    print(f"After removing NaN non_vuln_code: {len(df)}")
 
-	# Add Cluss column (Parent CWE)
-	cwe_uniques = df['cwe_id'].unique()
-	for cwe in cwe_uniques:
-		parents = explore_cwe.find_parents_dict(cwe.split('-')[1])
-		if parents is None or len(parents['Class']) == 0 : continue
-		df.loc[df['cwe_id'] == cwe, 'class'] = parents['Class'][-1]
+    df = df[df['non_vuln_code'] != 'None']
+    print(f"After removing 'None' non_vuln_code: {len(df)}")
 
-	df = df.dropna()
+    # remove rows where number of lines in the code is below 30
+    for col in ['vuln_code', 'non_vuln_code']:
+        df[f'{col}_num_lines'] = df[col].apply(
+            lambda x: x.count('\n') + 1 if isinstance(x, str) else 0
+        )
+    df = df[df['vuln_code_num_lines'] >= 30]
+    print(f"After filtering vuln_code with >=30 lines: {len(df)}")
 
-	return df
+    df = df[df['non_vuln_code_num_lines'] >= 30]
+    print(f"After filtering non_vuln_code with >=30 lines: {len(df)}")
+
+    # remove empty list in diff_deleted
+    df = df[df['diff_deleted'].apply(lambda x: isinstance(x, list) and len(x) > 0)]
+    print(f"After removing empty lists in diff_deleted: {len(df)}")
+
+    # token_count should be num
+    df['token_count'] = df['token_count'].apply(parse_py_literal)
+    df = df.dropna(subset=['token_count'])
+    print(f"After removing NaN token_count: {len(df)}")
+
+    df['token_count'] = pd.to_numeric(df['token_count'])
+
+    # drop the other CWEs
+    df = df[~df["cwe_id"].isin(remove_cwe)]
+    print(f"After removing specific CWEs: {len(df)}")
+
+    # Add Cluss column (Parent CWE)
+    cwe_uniques = df['cwe_id'].unique()
+    for cwe in cwe_uniques:
+        parents = explore_cwe.find_parents_dict(cwe.split('-')[1])
+        if parents is None or len(parents['Class']) == 0:
+            continue
+        df.loc[df['cwe_id'] == cwe, 'class'] = parents['Class'][-1]
+
+    df = df.dropna()
+    print(f"Final df length after dropna: {len(df)}")
+
+    return df
+
 
 def pick_samples(df):
 	sample_size = 10
@@ -165,10 +188,13 @@ def main():
 			"""
 		logger.info('Executing SQL query to fetch data')
 		df = pd.read_sql(query, con=conn)
+		print(len(df))
 		logger.info('Data fetched successfully, starting preprocessing')
 		df = pre_processing(df)
+		print(len(df))
 		logger.info('Preprocessing completed, starting sample selection')
 		vuln, non_vuln, df = pick_samples(df)
+		print(len(df))
 		logger.info('Sample selection completed, saving data to pickle files')
 
 		for f_name, data in zip(['test_vuln', 'test_non_vuln', 'df'], [vuln, non_vuln, df]):
