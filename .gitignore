@@ -33,7 +33,7 @@ nohup.out
 
 # Dataset folder
 CVEfixes/
-dataset/
+dataset/*
 
 *unsloth*/
 *.json*

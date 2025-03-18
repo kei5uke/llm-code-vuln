@@ -4,6 +4,7 @@ import re
 import pickle
 import logging
 import sys
+import os
 sys.path.append("utils")
 
 import sqlite_utils
@@ -196,7 +197,8 @@ def main():
 		vuln, non_vuln, df = pick_samples(df)
 		print(len(df))
 		logger.info('Sample selection completed, saving data to pickle files')
-
+    
+		os.makedirs('./dataset/test_pickles', exist_ok=True)
 		for f_name, data in zip(['test_vuln', 'test_non_vuln', 'df'], [vuln, non_vuln, df]):
 			with open(f'./dataset/test_pickles/{f_name}.pkl', 'wb') as f:
 				pickle.dump(data, f)

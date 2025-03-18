@@ -171,9 +171,6 @@ def classify_vuln(df, system_prompt, code_type, prompt_temp, prompt_type, rag_st
         code = row[code_type]
         user_prompt = prompt_temp + code
 
-        # if rag_step == False:
-        #     MODELS = ['hf.co/Kei5uke/llama3_30_epoch:latest', 'hf.co/Kei5uke/codellama_30_epoch:latest', 'hf.co/Kei5uke/phi4_30_epoch:latest', 'hf.co/Kei5uke/deepseek_30_epoch:latest']
-
         for m, model in enumerate(MODELS):
             try:
                 gpu_utils.free_gpu_memory()
