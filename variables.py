@@ -150,5 +150,5 @@ Your JSON response:"""
 # MODELS = ['llama3.1:8b', 'codellama:7b', 'phi4:14b', 'deepseek-r1:14b']
 MODELS = ['phi4:14b']
 
-TIMEOUT = 180  # 3 minutes
+TIMEOUT = 30  # 3 minutes
 SAVE_INTERVAL = 10  # Save progress every 10%

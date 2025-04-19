@@ -112,6 +112,8 @@ def classify_vuln(df, system_prompt, prompt_template, prompt_type, model, save_d
             user_prompt = prompt_template.format(code)
 
             token_count = calculate_token_length(system_prompt + user_prompt)
+            if token_count > 5000:
+                break
             progress = log_progress(
                 token_count, model, sample_index, total_samples)
 
